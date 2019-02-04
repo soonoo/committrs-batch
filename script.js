@@ -1,7 +1,11 @@
-const mysql = require('mysql');
-const { github: githubConfig, db: mysqlConfig } = require('./config');
-const connection = mysql.createConnection(mysqlConfig);
+const AWS = require('aws-sdk');
+const { github: githubConfig } = require('./config');
 const { exec } = require('child_process');
+
+AWS.config.update({
+  region: 'us-east-2',
+});
+const docClient = new AWS.DynamoDB.DocumentClient();
 
 // git client
 const Git = require('nodegit');
@@ -24,6 +28,19 @@ const query = (...args) => new Promise((resolve, reject) => {
   });
 });
 
+const put = (param) => new Promise((resolve, reject) => {
+  docClient.put(param, (err, data) => {
+    if(err) {
+      console.log(err)
+      reject(err);
+    }
+    else {
+      console.log(data)
+      resolve(data);
+    }
+  });
+})
+
 const execPromise = (command) => new Promise((resolve, reject) => {
     exec(command, (error, stdout, stderr) => {
         if (error) return reject(error);
@@ -36,12 +53,12 @@ const execPromise = (command) => new Promise((resolve, reject) => {
 let i = 0;
 const stargazers_limit = 30;
 //const users = ['toxtli', 'brianchandotcom', 'HugoGiraudel', 'kytrinyx', 'sevilayha'];
-const users = ['soonoo'];
-//const startTime = new Date();
+const users = ['soonoo', 'sindresorhus'];
 const cwd = process.cwd();
 
 module.exports = async function() {
   for(user of users) {
+    // TODO: users with 100+ repos
     const { data } = await octokit.repos.listForUser({ username: user })
 
     let repoList = await Promise.all(data.map((repo) => {
@@ -50,36 +67,48 @@ module.exports = async function() {
     })); 
     repoList = repoList.filter(repo => repo);
 
-    let repos = [];
     for(repo of repoList) {
       const repo_path = repo.data.fork ? repo.data.parent.full_name : repo.data.full_name;
 
       if((repo.data.source ? repo.data.source.stargazers_count : repo.data.stargazers_count) < stargazers_limit) continue;
+
       try {
+        process.chdir(`${cwd}`)
         await execPromise(`git clone --no-checkout https://github.com/${repo_path} repos/${repo_path}`)
-        repos.push(`${cwd}/repos/${repo_path}`);
-      } catch(e) {
-        repos.push('');
-      }
-    }
-    repos = repos.filter(path => path);
+        process.chdir(`${cwd}/repos/${repo_path}`);
 
-    for(repo of repos) {
-      process.chdir(repo);
-
-      // git log --author='torvalds' --all --stat --since=''
-      const log = await execPromise(`git log --author='${user}' --all --stat --pretty=format:'---committrs/subject---%n%s%n---committrs/body---%n%b---committrs/files_changed---'`);
-
-      if(log) {
-        const commits = log.split('---committrs/subject---').slice(1);
-        for(commit of commits) {
-          await query('insert into log(log) values(?)', [commit]);
+        const delimiters = ['---committrs/hash---\n', '---committrs/date---\n', '---committrs/subject---\n', '---committrs/body---\n', '---committrs/files_changed---\n'];
+        let log = '';
+        try {
+          log = await execPromise(`git log --author='${user}' --all --stat --pretty=format:'---committrs/sep---%n---committrs/hash---%n%H%n---committrs/date---%n%aI%n---committrs/subject---%n%s%n---committrs/body---%n%b---committrs/files_changed---'`);
+        } catch(e) {
+          log = 'trim!!!!';
         }
+
+        if(log) {
+          const commits = log.split('---committrs/sep---').slice(1);
+          for(commit of commits) {
+            const commitData = commit.split(new RegExp(delimiters.join('|'), 'g')).slice(1);
+            console.log(commitData)
+            await put({
+              TableName: 'committrs-commits',
+              Item: {
+                userName: user,
+                commitHash: commitData[0],
+                info: {
+                  repo_path,
+                  date: commitData[1],
+                  subject: commitData[2],
+                  body: commitData[3] || 'no body',
+                  files_changed: commitData[4] || 'no files changed',
+                }
+              }
+            })
+          }
+        }
+      } catch(e) {
       }
     }
   }
-
-  //console.log(((new Date()) - startTime)/1000);
-  await connection.destroy();
 };
 
