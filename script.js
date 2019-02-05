@@ -35,7 +35,6 @@ const put = (param) => new Promise((resolve, reject) => {
       reject(err);
     }
     else {
-      console.log(data)
       resolve(data);
     }
   });
@@ -53,13 +52,19 @@ const execPromise = (command) => new Promise((resolve, reject) => {
 let i = 0;
 const stargazers_limit = 30;
 //const users = ['toxtli', 'brianchandotcom', 'HugoGiraudel', 'kytrinyx', 'sevilayha'];
-const users = ['soonoo', 'sindresorhus'];
+const users = ['sindresorhus'];
 const cwd = process.cwd();
 
 module.exports = async function() {
   for(user of users) {
-    // TODO: users with 100+ repos
-    const { data } = await octokit.repos.listForUser({ username: user })
+    let page = 1;
+    let data = [];
+    do {
+      const repos = await octokit.repos.listForUser({ username: user, per_page: 100, page })
+      data = data.concat(repos.data);
+      page++;
+    } while(repos.data.length === 100);
+      //} while(repos.data.length > 1);
 
     let repoList = await Promise.all(data.map((repo) => {
       if(repo.fork === false && repo.stargazers_count < stargazers_limit) return;
